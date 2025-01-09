@@ -3,6 +3,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'dart:io';
+import 'package:http/http.dart' as http;
 import 'package:flutter_application_1/models/noteModel.dart';
 import 'package:flutter_application_1/services/db_helper.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -23,13 +24,15 @@ class _HomeState extends State<Home> {
   DatabaseHelper noteDatabase = DatabaseHelper.instance;
   List<File> _images = [];
   bool isLoading = false;
+  bool isUploading = false;
+
+  final String apiUrl = 'http://127.0.0.1:8000/upload-images';
 
   @override
   void initState() {
     super.initState();
-    // Automatically trigger image picker when the view is initialized
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _pickImages();
+      _pickAndUploadImages();
     });
   }
 
@@ -37,6 +40,70 @@ class _HomeState extends State<Home> {
   dispose() {
     noteDatabase.close();
     super.dispose();
+  }
+
+  Future<void> _pickAndUploadImages() async {
+    await _pickImages();
+    if (_images.isNotEmpty) {
+      await uploadImages();
+    }
+  }
+
+  Future<void> uploadImages() async {
+    if (_images.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No images to upload')),
+      );
+      return;
+    }
+
+    setState(() {
+      isUploading = true;
+    });
+
+    try {
+      var request = http.MultipartRequest('POST', Uri.parse(apiUrl));
+
+      // Add each image to the request
+      for (var i = 0; i < _images.length; i++) {
+        var file = _images[i];
+        var stream = http.ByteStream(file.openRead());
+        var length = await file.length();
+
+        var multipartFile = http.MultipartFile(
+          'images[]',
+          stream,
+          length,
+          filename: 'image_$i.jpg',
+        );
+
+        request.files.add(multipartFile);
+      }
+
+      var response = await request.send();
+
+      if (response.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Images uploaded successfully'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      } else {
+        throw Exception('Failed to upload images');
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error uploading images: ${e.toString()}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      setState(() {
+        isUploading = false;
+      });
+    }
   }
 
   Future<void> _pickImages() async {
@@ -63,10 +130,9 @@ class _HomeState extends State<Home> {
           type: RequestType.image,
         );
         if (albums.isNotEmpty) {
-          // Get the first 5 images
           List<AssetEntity> media = await albums[0].getAssetListRange(
             start: 0,
-            end: 5, // Get 5 images
+            end: 5,
           );
           
           List<File?> files = await Future.wait(
@@ -124,9 +190,19 @@ class _HomeState extends State<Home> {
         elevation: 0.0,
         title: Text(widget.title),
       ),
-      body: isLoading
-          ? const Center(
-              child: CircularProgressIndicator(),
+      body: isLoading || isUploading
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const CircularProgressIndicator(),
+                  const SizedBox(height: 16),
+                  Text(
+                    isUploading ? 'Uploading images...' : 'Loading images...',
+                    style: const TextStyle(fontSize: 16),
+                  ),
+                ],
+              ),
             )
           : _images.isEmpty
               ? const Center(
@@ -142,7 +218,11 @@ class _HomeState extends State<Home> {
                       childAspectRatio: 1,
                     ),
                     itemCount: _images.length,
-                    itemBuilder: (context, index) {
+                   itemBuilder: (context, index) {
+                      var file = _images[index];
+                      var fileName = file.path.split('/').last;
+                      var fileSize = file.lengthSync(); // Mendapatkan ukuran file
+
                       return Container(
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(12),
@@ -155,20 +235,54 @@ class _HomeState extends State<Home> {
                             ),
                           ],
                         ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(12),
-                          child: Image.file(
-                            _images[index],
-                            fit: BoxFit.cover,
-                          ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              child: ClipRRect(
+                                borderRadius: const BorderRadius.only(
+                                  topLeft: Radius.circular(12),
+                                  topRight: Radius.circular(12),
+                                ),
+                                child: Image.file(
+                                  file,
+                                  fit: BoxFit.cover,
+                                  width: double.infinity,
+                                ),
+                              ),
+                            ),
+                            Padding(
+                              padding: const EdgeInsets.all(8.0),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Name: $fileName',
+                                    style: const TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    'Size: ${(fileSize / 1024).toStringAsFixed(2)} KB',
+                                    style: const TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
                         ),
                       );
                     },
                   ),
                 ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _pickImages,
-        tooltip: 'Refresh Images',
+        onPressed: _pickAndUploadImages,
+        tooltip: 'Pick and Upload Images',
         child: const Icon(Icons.refresh),
       ),
     );
