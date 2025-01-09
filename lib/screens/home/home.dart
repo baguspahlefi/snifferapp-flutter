@@ -1,11 +1,13 @@
 // ignore_for_file: use_build_context_synchronously
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_application_1/screens/shared/topContainer.dart';
+import 'dart:io';
 import 'package:flutter_application_1/models/noteModel.dart';
-import 'package:flutter_application_1/screens/views/note_view.dart';
 import 'package:flutter_application_1/services/db_helper.dart';
-import 'package:percent_indicator/circular_percent_indicator.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:device_info_plus/device_info_plus.dart';
+import 'package:photo_manager/photo_manager.dart';
 
 class Home extends StatefulWidget {
   final String title;
@@ -17,232 +19,158 @@ class Home extends StatefulWidget {
 }
 
 class _HomeState extends State<Home> {
-  // Create an instance of the database helper
+  final deviceInfo = DeviceInfoPlugin();
   DatabaseHelper noteDatabase = DatabaseHelper.instance;
-  List<NoteModel> notes = [];
-
-  TextEditingController searchController = TextEditingController();
-  bool isSearchTextNotEmpty = false;
-  List<NoteModel> filteredNotes = []; // Maintain a list for filtered notes
-
+  List<File> _images = [];
+  bool isLoading = false;
 
   @override
   void initState() {
-    refreshNotes();
-    search();
     super.initState();
+    // Automatically trigger image picker when the view is initialized
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _pickImages();
+    });
   }
 
   @override
   dispose() {
-    // Close the database when no longer needed
     noteDatabase.close();
     super.dispose();
   }
 
-  // Search methods
-  search(){
-    searchController.addListener(() {
-      setState(() {
-        isSearchTextNotEmpty = searchController.text.isNotEmpty;
-        if (isSearchTextNotEmpty) {
-          // Perform filtering and update the filteredNotes list
-          filteredNotes = notes.where((note) {
-            return note.title!.toLowerCase().contains(searchController.text.toLowerCase()) ||
-                note.description!.toLowerCase().contains(searchController.text.toLowerCase());
-          }).toList();
-        } else {
-          // Clear the filteredNotes list
-          filteredNotes.clear();
-        }
-      });
+  Future<void> _pickImages() async {
+    setState(() {
+      isLoading = true;
     });
-  }
+    
+    PermissionStatus status;
+    
+    if (Platform.isAndroid) {
+      final AndroidDeviceInfo androidInfo = await deviceInfo.androidInfo;
+      if (androidInfo.version.sdkInt >= 33) {
+        status = await Permission.photos.request();
+      } else {
+        status = await Permission.storage.request();
+      }
+    } else {
+      status = await Permission.photos.request();
+    }
 
-  // Fetch and refresh the list of notes from the database
-  refreshNotes() {
-    noteDatabase.getAll().then((value) {
-      setState(() {
-        notes = value;
-      });
-    });
-  }
-
-  // Navigate to the NoteView screen and refresh notes afterward
-  goToNoteDetailsView({int? id}) async {
-    await Navigator.push(
-      context,
-      MaterialPageRoute(builder: (context) => NoteView(noteId: id)),
-    );
-    refreshNotes();
-  }
-
-  deleteNote({int? id}) async {
-    showDialog(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            title: const Row(children: [
-              Icon(
-                Icons.delete_forever,
-                color: Color.fromARGB(255, 255, 81, 0),
-              ),
-              Text('Delete permanently!')
-            ]),
-            content: const SingleChildScrollView(
-              child: ListBody(
-                children: <Widget>[
-                  Text('Are you sure, you want to delete this note?'),
-                ],
-              ),
-            ),
-            actions: [
-              ElevatedButton(
-                style: ButtonStyle(
-                    backgroundColor: MaterialStateProperty.all(Colors.red)),
-                onPressed: () async {
-                  await noteDatabase.delete(id!);
-                  Navigator.pop(context);
-                  setState(() {});
-                  ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                    content: Text("Note successfully deleted."),
-                    backgroundColor: Color.fromARGB(255, 235, 108, 108),
-                  ));
-                  refreshNotes();
-                },
-                child: const Text('Yes'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text('No'),
-              ),
-            ],
+    if (status.isGranted) {
+      try {
+        List<AssetPathEntity> albums = await PhotoManager.getAssetPathList(
+          type: RequestType.image,
+        );
+        if (albums.isNotEmpty) {
+          // Get the first 5 images
+          List<AssetEntity> media = await albums[0].getAssetListRange(
+            start: 0,
+            end: 5, // Get 5 images
           );
+          
+          List<File?> files = await Future.wait(
+            media.map((asset) => asset.file)
+          );
+          
+          setState(() {
+            _images = files.whereType<File>().toList();
+            isLoading = false;
+          });
+        }
+      } catch (e) {
+        if (kDebugMode) {
+          print('Error fetching images: $e');
+        }
+        setState(() {
+          isLoading = false;
         });
+      }
+    } else if (status.isPermanentlyDenied) {
+      setState(() {
+        isLoading = false;
+      });
+      
+      if (!context.mounted) return;
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Permission Required'),
+          content: const Text('Please enable storage permission in settings to pick images'),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () {
+                openAppSettings();
+                Navigator.pop(context);
+              },
+              child: const Text('Open Settings'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color.fromRGBO(247, 250, 252, 1.0),
-      body: Column(
-        children: <Widget>[
-          // Search TextField with Conditional Clear Button
-          Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: searchController,
-                    decoration: const InputDecoration(
-                      hintText: 'Search Notes...',
-                      prefixIcon: Icon(Icons.search),
+      appBar: AppBar(
+        backgroundColor: const Color.fromRGBO(94, 114, 228, 1.0),
+        elevation: 0.0,
+        title: Text(widget.title),
+      ),
+      body: isLoading
+          ? const Center(
+              child: CircularProgressIndicator(),
+            )
+          : _images.isEmpty
+              ? const Center(
+                  child: Text('No images found'),
+                )
+              : Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: GridView.builder(
+                    gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      crossAxisSpacing: 16,
+                      mainAxisSpacing: 16,
+                      childAspectRatio: 1,
                     ),
-                  ),
-                ),
-                if (isSearchTextNotEmpty)
-                  IconButton(
-                    icon: const Icon(Icons.clear),
-                    onPressed: () {
-                      // Clear the search text and update the UI
-                      searchController.clear();
-                      // Reset the filteredNotes list and refresh the original notes
-                      filteredNotes.clear();
-                      refreshNotes();
+                    itemCount: _images.length,
+                    itemBuilder: (context, index) {
+                      return Container(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(12),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.grey.withOpacity(0.2),
+                              spreadRadius: 2,
+                              blurRadius: 5,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(12),
+                          child: Image.file(
+                            _images[index],
+                            fit: BoxFit.cover,
+                          ),
+                        ),
+                      );
                     },
                   ),
-              ],
-            ),
-          ),
-          // Scrollable area for displaying notes
-          Expanded(
-            child: SingleChildScrollView(
-              child: Column(
-                children: [
-                  Container(
-                    child: notes.isEmpty
-                        ? const Padding(
-                            padding: EdgeInsets.only(top: 50.0),
-                            child: Text(
-                              "No records to display",
-                              style: TextStyle(
-                                fontWeight: FontWeight.normal,
-                                fontSize: 14,
-                              ),
-                            ),
-                          )
-                    : Column(
-                      children: [
-                        if (isSearchTextNotEmpty)
-                          ...filteredNotes.map((note) {
-                            // Display filtered notes
-                            return buildNoteCard(note);
-                          }).toList()
-                        else
-                          ...notes.map((note) {
-                            // Display original notes when not searching
-                            return buildNoteCard(note);
-                          }).toList(),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-      // Floating action button for creating new notes
-      floatingActionButton: FloatingActionButton(
-        onPressed: goToNoteDetailsView,
-        tooltip: 'Create Note',
-        child: const Icon(Icons.add),
-      ),
-    );
-  }
-
-  // Helper method to build a note card
-  Widget buildNoteCard(NoteModel note) {
-    return Card(
-      child: GestureDetector(
-        onTap: () => {},
-        child: ListTile(
-          leading: const Icon(
-            Icons.note,
-            color: Color.fromARGB(255, 253, 237, 89),
-          ),
-          title: Text(note.title ?? ""),
-          subtitle: Text(note.description ?? ""),
-          trailing: Wrap(
-            children: [
-              IconButton(
-                onPressed: () => goToNoteDetailsView(id: note.id),
-                icon: const Icon(Icons.arrow_forward_ios),
-              ),
-              IconButton(
-                onPressed: () => deleteNote(id: note.id),
-                icon: const Icon(
-                  Icons.delete,
-                  color: Color.fromARGB(255, 255, 81, 0),
                 ),
-              ),
-            ],
-          ),
-        ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _pickImages,
+        tooltip: 'Refresh Images',
+        child: const Icon(Icons.refresh),
       ),
-    );
-  }
-
-  // Helper method to define subheading text style
-  Text subheading(String title) {
-    return Text(
-      title,
-      style: const TextStyle(
-          color: Color.fromRGBO(94, 114, 228, 1.0),
-          fontSize: 20.0,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 1.2),
     );
   }
 }
